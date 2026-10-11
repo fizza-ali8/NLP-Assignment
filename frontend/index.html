@@ -1,0 +1,457 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Riverbend Library Assistant</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%232f4538'/%3E%3Cpath d='M32 20c-5-4-13-5-19-3v30c6-2 14-1 19 3 5-4 13-5 19-3V17c-6-2-14-1-19 3z' fill='%23f2ede2'/%3E%3Cpath d='M32 20v30' stroke='%23c98a3e' stroke-width='2.5' fill='none'/%3E%3C/svg%3E">
+<style>
+  :root {
+    --ink: #1d2b25;
+    --paper: #f2ede2;
+    --shelf: #2f4538;
+    --shelf-dark: #223329;
+    --amber: #c98a3e;
+    --amber-dark: #a86f2c;
+    --line: #d8cfb8;
+    --user-bubble: #2f4538;
+    --bot-bubble: #ffffff;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    font-family: "Iowan Old Style", "Georgia", serif;
+    background:
+      radial-gradient(ellipse at top, rgba(201,138,62,0.06), transparent 55%),
+      var(--paper);
+    color: var(--ink);
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+  }
+
+  header {
+    background: linear-gradient(180deg, var(--shelf) 0%, var(--shelf-dark) 100%);
+    color: var(--paper);
+    padding: 16px 28px 0;
+  }
+
+  .header-top {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding-bottom: 14px;
+  }
+
+  .logo-mark {
+    width: 34px;
+    height: 34px;
+    flex-shrink: 0;
+  }
+
+  .header-text { display: flex; flex-direction: column; }
+
+  header h1 {
+    font-size: 1.25rem;
+    margin: 0;
+    font-weight: 600;
+    letter-spacing: 0.01em;
+    line-height: 1.15;
+  }
+
+  header .tag {
+    font-family: "Helvetica Neue", Arial, sans-serif;
+    font-size: 0.7rem;
+    color: var(--amber);
+    letter-spacing: 0.08em;
+  }
+
+  @media (max-width: 600px) {
+    header { padding: 12px 16px 0; }
+    .logo-mark { width: 26px; height: 26px; }
+    header h1 { font-size: 1.02rem; }
+    header .tag { font-size: 0.62rem; }
+  }
+
+  /* decorative bookshelf: a fixed-size tile of upright book "spines" that
+     repeats horizontally, so book width stays constant on any screen size
+     instead of stretching on wide viewports */
+  .shelf-row {
+    display: block;
+    width: 100%;
+    height: 40px;
+    background-image: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A//www.w3.org/2000/svg%22%20width%3D%22202.9%22%20height%3D%2246%22%20viewBox%3D%220%200%20202.9%2046%22%3E%3Crect%20x%3D%220.0%22%20y%3D%2219.9%22%20width%3D%2217.6%22%20height%3D%2226.1%22%20rx%3D%221%22%20fill%3D%22%23b06a4e%22/%3E%3Crect%20x%3D%220.0%22%20y%3D%2224.6%22%20width%3D%2217.6%22%20height%3D%221.6%22%20fill%3D%22%23f2ede2%22%20opacity%3D%220.35%22/%3E%3Crect%20x%3D%2219.6%22%20y%3D%2218.9%22%20width%3D%2218.5%22%20height%3D%2227.1%22%20rx%3D%221%22%20fill%3D%22%23c9925f%22/%3E%3Crect%20x%3D%2219.6%22%20y%3D%2223.8%22%20width%3D%2218.5%22%20height%3D%221.6%22%20fill%3D%22%23f2ede2%22%20opacity%3D%220.35%22/%3E%3Crect%20x%3D%2240.1%22%20y%3D%224.2%22%20width%3D%2221.4%22%20height%3D%2241.8%22%20rx%3D%221%22%20fill%3D%22%238a5a3b%22/%3E%3Crect%20x%3D%2240.1%22%20y%3D%2211.7%22%20width%3D%2221.4%22%20height%3D%221.6%22%20fill%3D%22%23f2ede2%22%20opacity%3D%220.35%22/%3E%3Crect%20x%3D%2263.5%22%20y%3D%228.9%22%20width%3D%2217.7%22%20height%3D%2237.1%22%20rx%3D%221%22%20fill%3D%22%23a8763e%22/%3E%3Crect%20x%3D%2263.5%22%20y%3D%2215.6%22%20width%3D%2217.7%22%20height%3D%221.6%22%20fill%3D%22%23f2ede2%22%20opacity%3D%220.35%22/%3E%3Crect%20x%3D%2283.2%22%20y%3D%220.8%22%20width%3D%2218.1%22%20height%3D%2245.2%22%20rx%3D%221%22%20fill%3D%22%233f5a4a%22/%3E%3Crect%20x%3D%2283.2%22%20y%3D%228.9%22%20width%3D%2218.1%22%20height%3D%221.6%22%20fill%3D%22%23f2ede2%22%20opacity%3D%220.35%22/%3E%3Crect%20x%3D%22103.3%22%20y%3D%227.7%22%20width%3D%2218.7%22%20height%3D%2238.3%22%20rx%3D%221%22%20fill%3D%22%233f5a4a%22/%3E%3Crect%20x%3D%22103.3%22%20y%3D%2214.6%22%20width%3D%2218.7%22%20height%3D%221.6%22%20fill%3D%22%23f2ede2%22%20opacity%3D%220.35%22/%3E%3Crect%20x%3D%22124.0%22%20y%3D%2221.7%22%20width%3D%2215.5%22%20height%3D%2224.3%22%20rx%3D%221%22%20fill%3D%22%23c9925f%22/%3E%3Crect%20x%3D%22124.0%22%20y%3D%2226.1%22%20width%3D%2215.5%22%20height%3D%221.6%22%20fill%3D%22%23f2ede2%22%20opacity%3D%220.35%22/%3E%3Crect%20x%3D%22141.5%22%20y%3D%2220.6%22%20width%3D%2218.1%22%20height%3D%2225.4%22%20rx%3D%221%22%20fill%3D%22%238a5a3b%22/%3E%3Crect%20x%3D%22141.5%22%20y%3D%2225.2%22%20width%3D%2218.1%22%20height%3D%221.6%22%20fill%3D%22%23f2ede2%22%20opacity%3D%220.35%22/%3E%3Crect%20x%3D%22161.6%22%20y%3D%2217.8%22%20width%3D%2219.0%22%20height%3D%2228.2%22%20rx%3D%221%22%20fill%3D%22%234d6b52%22/%3E%3Crect%20x%3D%22161.6%22%20y%3D%2222.9%22%20width%3D%2219.0%22%20height%3D%221.6%22%20fill%3D%22%23f2ede2%22%20opacity%3D%220.35%22/%3E%3Crect%20x%3D%22182.6%22%20y%3D%228.8%22%20width%3D%2220.3%22%20height%3D%2237.2%22%20rx%3D%221%22%20fill%3D%22%235c4a3a%22/%3E%3Crect%20x%3D%22182.6%22%20y%3D%2215.5%22%20width%3D%2220.3%22%20height%3D%221.6%22%20fill%3D%22%23f2ede2%22%20opacity%3D%220.35%22/%3E%3C/svg%3E");
+    background-repeat: repeat-x;
+    background-position: left bottom;
+    background-size: auto 40px;
+    border-bottom: 3px solid var(--amber);
+  }
+
+  @media (max-width: 600px) {
+    .shelf-row { height: 30px; background-size: auto 30px; }
+  }
+
+  #status-bar {
+    font-family: "Helvetica Neue", Arial, sans-serif;
+    font-size: 0.75rem;
+    padding: 6px 28px;
+    background: var(--shelf-dark);
+    color: #cfd9d1;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  @media (max-width: 600px) {
+    #status-bar { padding: 6px 16px; font-size: 0.68rem; }
+  }
+
+  #status-bar button {
+    background: none;
+    border: 1px solid var(--amber);
+    color: var(--amber);
+    border-radius: 4px;
+    padding: 3px 10px;
+    font-family: inherit;
+    font-size: 0.72rem;
+    cursor: pointer;
+  }
+
+  #status-bar button:hover { background: var(--amber); color: var(--shelf-dark); }
+
+  #chat {
+    flex: 1;
+    overflow-y: auto;
+    padding: 24px 18%;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+
+  @media (max-width: 900px) {
+    #chat { padding: 18px 6%; }
+  }
+
+  #empty-state {
+    margin: auto;
+    text-align: center;
+    color: #8a9188;
+    max-width: 360px;
+  }
+  #empty-state svg { width: 40px; height: 40px; margin-bottom: 10px; opacity: 0.7; }
+  #empty-state p { margin: 4px 0; font-size: 0.92rem; }
+  #empty-state .hint {
+    font-family: "Helvetica Neue", Arial, sans-serif;
+    font-size: 0.72rem;
+    color: #a8ac9e;
+  }
+
+  .msg {
+    max-width: 72%;
+    padding: 12px 16px;
+    border-radius: 14px;
+    line-height: 1.5;
+    font-size: 0.98rem;
+    white-space: pre-wrap;
+    box-shadow: 0 1px 2px rgba(29,43,37,0.06);
+  }
+
+  @media (max-width: 600px) {
+    .msg { max-width: 88%; font-size: 0.92rem; padding: 10px 13px; }
+  }
+
+  .msg.user {
+    align-self: flex-end;
+    background: var(--user-bubble);
+    color: var(--paper);
+    border-bottom-right-radius: 3px;
+  }
+
+  .msg.bot {
+    align-self: flex-start;
+    background: var(--bot-bubble);
+    border: 1px solid var(--line);
+    border-bottom-left-radius: 3px;
+  }
+
+  .msg.error {
+    align-self: center;
+    background: #fbe4e0;
+    border: 1px solid #d98a7d;
+    color: #7a2f22;
+    font-family: "Helvetica Neue", Arial, sans-serif;
+    font-size: 0.82rem;
+    max-width: 85%;
+  }
+
+  .meta {
+    font-family: "Helvetica Neue", Arial, sans-serif;
+    font-size: 0.68rem;
+    color: #8a9188;
+    margin-top: 4px;
+  }
+
+  /* Assignment 2: visible citations - small source chips under a grounded
+     bot reply, shown when the "done" event carries a non-empty "sources"
+     array. Deliberately understated (not a big banner) since not every
+     reply is grounded - only the ones where retrieval actually found
+     something relevant. */
+  .sources {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 8px;
+  }
+  .source-chip {
+    font-family: "Helvetica Neue", Arial, sans-serif;
+    font-size: 0.68rem;
+    background: #eef1ea;
+    border: 1px solid var(--line);
+    color: #4d5a4f;
+    padding: 3px 9px;
+    border-radius: 999px;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .source-chip::before {
+    content: "📄";
+    font-size: 0.7em;
+  }
+
+  #composer {
+    display: flex;
+    gap: 10px;
+    padding: 16px 18%;
+    border-top: 1px solid var(--line);
+    background: var(--paper);
+  }
+
+  @media (max-width: 900px) {
+    #composer { padding: 12px 6%; }
+  }
+
+  #composer input {
+    flex: 1;
+    padding: 12px 14px;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    font-family: inherit;
+    font-size: 0.98rem;
+    background: #fff;
+  }
+
+  #composer input:focus-visible { outline: 2px solid var(--amber); outline-offset: 1px; }
+
+  #composer button {
+    background: var(--amber);
+    color: #fff;
+    border: none;
+    border-radius: 10px;
+    padding: 0 22px;
+    font-family: "Helvetica Neue", Arial, sans-serif;
+    font-weight: 600;
+    font-size: 0.9rem;
+    cursor: pointer;
+  }
+
+  #composer button:disabled { background: #cbb99b; cursor: not-allowed; }
+  #composer button:not(:disabled):hover { background: var(--amber-dark); }
+  #composer button:focus-visible { outline: 2px solid var(--shelf); outline-offset: 2px; }
+
+  .cursor {
+    display: inline-block;
+    width: 7px;
+    height: 1em;
+    background: var(--ink);
+    margin-left: 2px;
+    vertical-align: text-bottom;
+    animation: blink 1s step-start infinite;
+  }
+  @keyframes blink { 50% { opacity: 0; } }
+
+  @media (prefers-reduced-motion: reduce) {
+    .cursor { animation: none; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="header-top">
+    <svg class="logo-mark" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
+      <path d="M32 20c-5-4-13-5-19-3v30c6-2 14-1 19 3 5-4 13-5 19-3V17c-6-2-14-1-19 3z" fill="#f2ede2"/>
+      <path d="M32 20v30" stroke="#c98a3e" stroke-width="2.5" fill="none"/>
+    </svg>
+    <div class="header-text">
+      <h1>Riverbend Community Library</h1>
+      <span class="tag">LIBRARY ASSISTANT</span>
+    </div>
+  </div>
+  <div class="shelf-row" aria-hidden="true"></div>
+</header>
+
+<div id="status-bar">
+  <span id="conn-status">Connecting…</span>
+  <button id="reset-btn">New session</button>
+</div>
+
+<div id="chat">
+  <div id="empty-state">
+    <svg viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
+      <path d="M32 20c-5-4-13-5-19-3v30c6-2 14-1 19 3 5-4 13-5 19-3V17c-6-2-14-1-19 3z" fill="none" stroke="#8a9188" stroke-width="2"/>
+      <path d="M32 20v30" stroke="#8a9188" stroke-width="2"/>
+    </svg>
+    <p>Welcome to Riverbend Community Library.</p>
+    <p class="hint">Ask about hours, borrowing a book, holds, or your membership.</p>
+  </div>
+</div>
+
+<form id="composer">
+  <input id="input" type="text" placeholder="Ask about books, loans, holds, or hours…" autocomplete="off" />
+  <button id="send-btn" type="submit">Send</button>
+</form>
+
+<script>
+// ---- Configuration -----------------------------------------------------
+const WS_URL = "ws://localhost:8000/ws/chat";
+
+// ---- State ---------------------------------------------------------------
+let ws = null;
+let sessionId = localStorage.getItem("library_session_id") || null;
+let currentBotBubble = null;
+let currentBotText = "";
+
+const chatEl = document.getElementById("chat");
+const inputEl = document.getElementById("input");
+const sendBtn = document.getElementById("send-btn");
+const statusEl = document.getElementById("conn-status");
+const resetBtn = document.getElementById("reset-btn");
+
+function clearEmptyState() {
+  const empty = document.getElementById("empty-state");
+  if (empty) empty.remove();
+}
+
+function addMessage(role, text) {
+  clearEmptyState();
+  const div = document.createElement("div");
+  div.className = "msg " + role;
+  div.textContent = text;
+  chatEl.appendChild(div);
+  chatEl.scrollTop = chatEl.scrollHeight;
+  return div;
+}
+
+function addMeta(container, text) {
+  const meta = document.createElement("div");
+  meta.className = "meta";
+  meta.textContent = text;
+  container.appendChild(meta);
+}
+
+function addSources(container, sources) {
+  if (!sources || sources.length === 0) return;
+  const wrap = document.createElement("div");
+  wrap.className = "sources";
+  sources.forEach((s) => {
+    const chip = document.createElement("span");
+    chip.className = "source-chip";
+    chip.textContent = s.title;
+    chip.title = s.source;
+    wrap.appendChild(chip);
+  });
+  container.appendChild(wrap);
+}
+
+function connect() {
+  ws = new WebSocket(WS_URL);
+
+  ws.onopen = () => {
+    statusEl.textContent = "Connected";
+    sendBtn.disabled = false;
+  };
+
+  ws.onclose = () => {
+    statusEl.textContent = "Disconnected — retrying in 2s…";
+    sendBtn.disabled = true;
+    setTimeout(connect, 2000);
+  };
+
+  ws.onerror = () => {
+    statusEl.textContent = "Connection error";
+  };
+
+  ws.onmessage = (event) => {
+    let data;
+    try {
+      data = JSON.parse(event.data);
+    } catch {
+      return;
+    }
+
+    if (data.type === "session") {
+      sessionId = data.session_id;
+      localStorage.setItem("library_session_id", sessionId);
+    } else if (data.type === "token") {
+      if (!currentBotBubble) {
+        currentBotBubble = addMessage("bot", "");
+        currentBotText = "";
+      }
+      currentBotText += data.content;
+      currentBotBubble.textContent = currentBotText;
+      chatEl.scrollTop = chatEl.scrollHeight;
+    } else if (data.type === "done") {
+      if (currentBotBubble) {
+        addSources(currentBotBubble, data.sources);
+        addMeta(currentBotBubble, `TTFT ${data.ttft}s · ${data.tokens_per_sec} tok/s`);
+      }
+      currentBotBubble = null;
+      currentBotText = "";
+      sendBtn.disabled = false;
+    } else if (data.type === "error") {
+      addMessage("error", data.content);
+      currentBotBubble = null;
+      sendBtn.disabled = false;
+    }
+  };
+}
+
+function sendMessage(text) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  addMessage("user", text);
+  sendBtn.disabled = true;
+  ws.send(JSON.stringify({ session_id: sessionId, message: text }));
+}
+
+document.getElementById("composer").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const text = inputEl.value.trim();
+  if (!text) return;
+  sendMessage(text);
+  inputEl.value = "";
+});
+
+resetBtn.addEventListener("click", async () => {
+  chatEl.innerHTML = "";
+  if (sessionId) {
+    try {
+      const res = await fetch(`http://localhost:8000/session/${sessionId}/reset`, { method: "POST" });
+      const data = await res.json();
+      sessionId = data.session_id;
+      localStorage.setItem("library_session_id", sessionId);
+    } catch (e) {
+      console.error("Reset failed", e);
+    }
+  }
+  addMessage("bot", "Session reset. Hi again! How can I help you at Riverbend Library today?");
+});
+
+connect();
+</script>
+</body>
+</html>
