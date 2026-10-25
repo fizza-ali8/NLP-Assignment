@@ -1,14 +1,17 @@
-# Riverbend Library Assistant (Assignment 2: RAG)
+# Riverbend Library Assistant (Assignments 1–3)
 
 A fully **local, CPU-only** chatbot for a community library. Assignment 1 gave
-it a local LLM (Ollama `qwen2.5:3b`, Q4_K_M), a FastAPI WebSocket backend and
-a web frontend. Assignment 2 adds **Retrieval-Augmented Generation**: answers
-are grounded in a 69-document library corpus and cite their source documents.
-No cloud API and no external tools are used anywhere.
+it a local LLM (Ollama `qwen2.5:3b`), a FastAPI WebSocket backend and a web
+frontend. Assignment 2 grounds answers in a 69-document library corpus.
+Assignment 3 adds a local voice pipeline (speech-to-text and text-to-speech)
+and tools the model can call: overdue fines, study-room bookings, catalogue
+lookup, and a patron memory record. Typed chat still uses the original
+WebSocket messages.
 
 > **Numbers policy.** Every number in this README is either a fixed design
 > parameter or was measured on the machine listed in §7 with the command
-> shown next to it. Nothing was estimated.
+> shown next to it. Nothing was estimated. Voice-model numbers are filled in
+> by `python benchmark_voice.py` after the ASR and TTS models are installed.
 
 ---
 
@@ -22,32 +25,47 @@ in the catalogue. It refuses off-topic requests and resists jailbreaks.
 
 ```mermaid
 flowchart LR
-  FE[frontend/index.html] <-- WebSocket /ws/chat --> M[main.py FastAPI]
-  M --> Q[build_retrieval_query<br/>follow-up rewrite]
+  FE[frontend/index.html<br/>mic + speaker] <-- WebSocket /ws/chat --> M[main.py FastAPI]
+  M --> V[voice pipeline<br/>faster-whisper + Piper]
+  M --> Q[build_retrieval_query]
   Q --> R[retriever.retrieve_safe<br/>thread pool + 2s timeout + LRU cache]
   R --> E[fastembed MiniLM<br/>ONNX, CPU]
-  R --> I[(rag/index<br/>embeddings.npy + chunks.json)]
-  R --> F[format_context<br/>1000-char budget]
-  F --> C[conversation_manager<br/>build_prompt_messages<br/>18000-char budget]
+  R --> I[(rag/index)]
+  M --> T[tool orchestrator<br/>2s timeout]
+  T --> T1[calculate_fine]
+  T --> T2[study_room calendar]
+  T --> T3[search_catalogue]
+  T --> T4[patron_memory CRM]
+  R --> C[conversation_manager]
+  T --> C
   C --> L[llm_engine -> Ollama qwen2.5:3b]
   L --> M
-  CORPUS[corpus/books 50 + policies 19] -- python -m rag.ingest, incremental --> I
+  V --> M
+  CORPUS[corpus 69 documents] -- python -m rag.ingest --> I
 ```
 
-Per message: embed the query (follow-ups such as "how many copies of it?"
-inherit the previous patron message), cosine-search the index, keep the top
-`k=4` chunks scoring ≥ `0.30`, format them under a 1000-char budget, attach
-them to the **current user turn**, stream the model's answer unchanged, and
-send the sources on the final `done` event.
+Typed or spoken, one turn does the same work: retrieve, run a tool if the
+utterance needs one, build `[system][recent history][user + excerpts + tool
+result]`, stream tokens. A spoken reply is also synthesised sentence by
+sentence while those tokens are still arriving. The text message shapes from
+Assignment 1 are unchanged.
 
-## 3. WebSocket contract (unchanged)
+## 3. WebSocket contract (text path unchanged)
 
 Client → server `{"session_id": "...", "message": "..."}`; server → client
 `{"type":"token"|"done"|"error", ...}` with the same required fields as
-Assignment 1. The **only** addition is an *optional* `sources` array on `done`
-(`[{"title","source"}]`, deduplicated, relevance order, absent when nothing was
-retrieved). A client that ignores it behaves exactly like Assignment 1. Extra
-endpoints: `GET /rag/status`, `POST /rag/reload`.
+Assignment 1. Optional extras, which an old client can ignore:
+
+- `sources` on `done` when retrieval injected a document (Assignment 2)
+- `user_id` on the client message (Assignment 3, stable browser id for the CRM)
+- `timings` on `done` for a voice turn only
+
+Voice uses **extra** frame types on the same socket, never instead of the text ones:
+
+- client → `audio_start`, `audio_chunk` (base64 PCM s16le, 16 kHz, mono), `audio_end`
+- server → `transcript` (`final` false while listening or on a partial, true for the utterance), `speech_end`, `audio` (base64 WAV, `seq` in order), `audio_done`
+
+The final transcript is stored and answered by the same conversation manager as typed text. Extra endpoints: `GET /rag/status`, `POST /rag/reload`, `GET /voice/status`, `GET /tools`.
 
 ## 4. Design choices and why
 
@@ -207,27 +225,81 @@ ollama pull qwen2.5:3b
 
 cd backend
 python -m venv venv && venv\Scripts\activate        # Windows
-pip install fastapi "uvicorn[standard]" httpx pydantic websockets numpy fastembed
-python -m rag.ingest                                 # needs internet once (downloads MiniLM)
+pip install -r requirements.txt
+pip install -r requirements-voice.txt               # faster-whisper + piper-tts
+python -m voice.setup                               # Piper voice, one download
+python -m rag.ingest                                 # MiniLM embeddings, one download
 uvicorn main:app --port 8000
 cd ../frontend && python -m http.server 5500         # open http://localhost:5500
 ```
+
+The microphone button streams audio to the backend. Typed chat does not need the voice packages. `GET /voice/status` reports whether ASR and TTS are ready.
 
 Python 3.14 note: pinned `pydantic-core` fails to build, so dependencies are
 unpinned. If `fastembed`/`onnxruntime` fails to install, use Python 3.12.
 `set OLLAMA_KEEP_ALIVE=30m` is optional (the backend also sends it).
 
-## 6. Tests (68, all offline)
+## 6. Voice, tools, and the CRM (Assignment 3)
+
+### Models
+
+| Piece | Choice | Why |
+|---|---|---|
+| LLM | Ollama `qwen2.5:3b` | Same local model as Assignments 1 and 2. The system prompt stays byte-for-byte identical every turn, so its prompt cache still works. Tool results are attached to the user message, not the system prompt. |
+| ASR | faster-whisper `tiny.en`, CPU, int8 | Local. No browser speech API and no cloud. `tiny.en` is the smallest English model so the gap after the person stops talking stays short. One transcription at a time (a lock) so two patrons share the CPU without crashing the model. |
+| TTS | Piper `en_US-lessac-medium` | Local neural voice. A sentence is synthesised as soon as its punctuation arrives, on a worker thread, and the WAV is sent with a sequence number. The browser plays them in order while the text is still streaming. |
+| Embeddings | fastembed MiniLM | Unchanged from Assignment 2. |
+
+### How a spoken turn works
+
+1. The page captures the microphone, downsamples to 16 kHz PCM, and sends short base64 chunks.
+2. The server watches the energy. After speech has started, about 800 ms of silence (or the Stop button, or 30 seconds) ends the utterance.
+3. faster-whisper produces the transcript. A partial transcript is attempted once the audio is longer than 4 seconds. The final transcript is what enters the conversation.
+4. That text goes through retrieval, tools, and token streaming, the same function typed text uses (`turn.complete_turn`).
+5. Finished sentences are spoken immediately. The reply is not buffered until the model stops.
+
+If ASR or TTS is not installed, the socket gets a clear error (ASR) or the reply stays text-only (TTS). The server does not hang.
+
+### Tools
+
+The orchestrator has two paths, and both end the same way: a tool runs, its text is attached to the user message, and the model writes the reply the patron sees and hears.
+
+1. **Fast path, before generation.** Obvious sentences are turned into a call without spending a model round trip. "How much is the fine for 4 days?" is one. "Book a study room tomorrow at 2pm" is one. A vague "can I book a study room?" is left to retrieval, because it has no date or time.
+2. **Prompt path.** The system prompt (`tools/specs.py`, included in `prompts.py`) tells the model that if it needs a tool it must reply with only `TOOL_CALL: {"name":"...","arguments":{...}}`. `StreamGate` hides that line. The tool runs. A second generation phrases the answer. At most one model-requested call per turn. A timeout or a crash becomes a sentence, not a dead socket. The whole tool step shares a **2 second** deadline.
+
+| Tool | What it does | Example the model can emit |
+|---|---|---|
+| `calculate_fine` | $0.25/day/item, cap $10/item, block above $15, lost at 30 days. Required: `days`. Optional: `items` (default 1). | `TOOL_CALL: {"name":"calculate_fine","arguments":{"days":4,"items":1}}` → `$1.00` |
+| `study_room` | Local `data/calendar.json`. `action` is `book`, `list`, or `cancel`. Book needs `date` (`YYYY-MM-DD`) and `start` (`HH:MM`). `hours` is 1 or 2, `room` is 1–4, within opening hours and 7 days ahead. | `TOOL_CALL: {"name":"study_room","arguments":{"action":"book","date":"2026-10-26","start":"14:00","hours":2,"name":"Ada"}}` |
+| `search_catalogue` | SQLite built from `corpus/books`. Argument: `query` (title or author). | `TOOL_CALL: {"name":"search_catalogue","arguments":{"query":"Clean Code"}}` |
+| `patron_memory` (bonus CRM) | JSON file keyed by the browser `user_id`. `action` is `recall` or `update`, with optional `name`, `email`, `phone`, `preference`. | `TOOL_CALL: {"name":"patron_memory","arguments":{"action":"update","name":"Ada","email":"ada@example.com"}}` |
+
+Schemas are also served by `GET /tools`.
+
+The CRM record is read at the start of every turn that has a `user_id` and injected as `PATRON MEMORY`, so a returning patron can be greeted by name and the last question can be mentioned once. "My name is Ada" updates the record on the fast path. The question itself is stored at the end of the turn, so the next visit still knows what they asked. The browser keeps `library_user_id` in localStorage, separate from the session, so New session clears the chat and keeps the person.
+
+### Latency (Phase V)
+
+`python benchmark_voice.py` (hardware is in the evaluation section below):
+
+| Stage | Result |
+|---|---|
+| Tool calls (fine, catalogue, study-room list), 60 calls | avg **3.25 ms**, max **23.21 ms** |
+| Retrieval | avg **75.3 ms** (Assignment 2 measurement, unchanged) |
+| ASR | warm avg **744 ms**, max **755 ms** on a 1.86 s Piper sentence. Transcript came back as "The library is open until 8." The first launch also downloads `tiny.en` (about 3.5 minutes observed once); that download is not part of the 744 ms. |
+| TTS first sentence | avg **235 ms**, max **241 ms** (`en_US-lessac-medium`, sentence "The overdue fine is one dollar.") |
+| LLM first token | about **1.5 s** with RAG off and about **8.3 s** with a retrieved excerpt, from the end-to-end table below. Voice does not add a second model call on the fast path. |
+| End of speech → first audio | ASR 744 ms + retrieval 75 ms + tools 3 ms + LLM first token + TTS 235 ms. Tools and retrieval are far under the 2-second budget. Adding the measured ASR and TTS to the no-RAG first token (~1.5 s) is about **2.6 s**. With a retrieved excerpt the first token is ~8.3 s, so the 1–2 second target is missed on this CPU because of the language model, not because of lookup or speech. A voice `done` event includes `timings` with each stage for that turn. |
+
+Two patrons at once: each WebSocket is its own task. Retrieval, tools, ASR, and TTS run in threads, so one person's embed or transcription does not freeze the other's socket. ASR holds one model lock so the two calls queue instead of corrupting Whisper. Ollama still generates one reply at a time unless `OLLAMA_NUM_PARALLEL` is raised.
+
+## 7. Tests
 
 ```bash
 cd backend && python -m unittest discover -s tests -t .
 ```
-Corpus integrity, chunking, incremental ingest, retriever (top-k, threshold,
-cache, follow-ups, hot reload, corrupt index, timeouts, concurrency),
-conversation manager (overflow priorities) and real-WebSocket integration
-tests against a fake Ollama (static system prompt, excerpts on last turn,
-unchanged contract, `RAG_ENABLED=0`, degraded retrieval). Tests use a lexical
-stand-in embedder, so they verify the *logic*, not real-model quality.
+
+The suite covers the Assignment 1–2 behaviour (corpus, chunking, ingest, retriever, overflow, WebSocket contract) and Assignment 3: fine maths, calendar conflicts and the file lock, catalogue copy counts, CRM recall across a reload of the file, the stream gate, tool timeouts that do not block the event loop, end-of-speech detection, sentence splitting, a spoken turn that hits `calculate_fine` and returns audio, and a model `TOOL_CALL` that the patron never sees. Tests use a lexical embedder and a fake Ollama. They do not need the voice models.
 
 ### End-to-end latency finding (Intel Core i7-8650U, 4 cores / 8 threads, qwen2.5:3b Q4, CPU only)
 
@@ -266,21 +338,23 @@ without either smaller chunks or a faster machine. Trade-off accepted: a slower 
 in exchange for grounded, cited answers. The tokens/s of generation are unchanged (streaming
 code was not touched).
 
-## 7. Evaluation and benchmarks
+## 8. Evaluation and benchmarks
 
 | What | Command | Result |
 |---|---|---|
 | Retrieval quality + threshold | `python eval_retrieval.py --sweep` | measured at MIN_SCORE 0.30 on 51 in-domain + 12 no-match queries: hit@1 88%, hit@4 94% (48/51), MRR 0.91, no-match correct 9/12 |
 | Retrieval latency (embed vs search, p50/p95, <1 s) | `python benchmark_retrieval.py --runs 10` | measured: avg **75.3 ms** end to end (embed query + search), max 708.7 ms (first call, model warm-up), vector search alone 0.2 ms; 10/10 requests under 1 s |
 | LLM only | `python benchmark.py --model qwen2.5:3b --runs 5` | Assignment 1 run: TTFT 1.503 s, total 10.219 s, 6.53 tok/s |
-| End-to-end, RAG on vs off | `python benchmark_e2e.py --label rag_on` / restart with `set RAG_ENABLED=0` → `--label rag_off` | see the tables in §6: first-ask TTFT 1.52 s (off) vs 8.28 s (on) |
+| End-to-end, RAG on vs off | `python benchmark_e2e.py --label rag_on` / restart with `set RAG_ENABLED=0` → `--label rag_off` | see the end-to-end table in Tests: first-ask TTFT 1.52 s (off) vs 8.28 s (on) |
+| Tool latency | `python benchmark_voice.py` | measured: 60 calls, avg **3.25 ms**, max **23.21 ms** |
+| ASR / TTS | same command | ASR warm **744 ms** (1.86 s sentence). TTS first sentence avg **235 ms**, max **241 ms** |
 | Real dialogues | `python collect_transcripts.py` → `docs/example_dialogues.md` | generated |
 
 Hardware: Dell Latitude 5490, Intel Core i7-8650U @ 1.90 GHz (4 cores / 8 threads), 16 GB RAM, Windows, no GPU.
 The first request after loading the model is slow (cold load ~50 s observed);
 numbers above exclude it (warm-up request first).
 
-## 8. Known limitations
+## 9. Known limitations
 
 - Retrieval quality was measured on only 60 hand-written queries; threshold
   tuned on the same set (see §4.5). Three library-adjacent but uncovered
@@ -292,7 +366,11 @@ numbers above exclude it (warm-up request first).
 - No live inventory: copy counts come from the corpus files.
 - Sessions are in-memory and lost on restart; retrieval degradation is logged
   and visible in `/rag/status` but not shown to patrons.
-- English only; MiniLM has no multilingual support.
+- English only; MiniLM and `tiny.en` have no multilingual support.
+- End of speech to first audio cannot hit 1–2 seconds on this CPU, because the language model's first token is already several seconds. Retrieval (75 ms) and tools (under 12 ms) are not the cause. The prompt-based tool path adds a second generation when the fast path does not recognise the sentence.
+- A 3B model sometimes ignores the `TOOL_CALL` line. The fast path covers the phrasings in the tests; a paraphrased request can miss the tool and be answered from retrieval instead.
+- Piper and faster-whisper are local. The first ASR run downloads `tiny.en`. After that, a short utterance transcribes in about 0.7 s and the first sentence is spoken in about 0.2 s.
+- Study-room bookings and patron records are local JSON files, not a real calendar or membership database. Two patrons booking the same room are serialised by a file lock.
 - Small-model answer quality (see `docs/example_dialogues.md`, real output): a follow-up
   such as "How many copies of it?" retrieved the right document but the 3B model repeated
   its previous answer instead of stating "0 of 5"; "can I book a study room?" produced a
@@ -303,12 +381,15 @@ numbers above exclude it (warm-up request first).
   single questions). Longer history plus excerpts means more prompt to read on a 15 W CPU;
   we did not isolate how much is history growth versus trimming (`MAX_TURNS=6`).
 
-## 9. Layout
+## 10. Layout
 
 ```
-backend/ main.py llm_engine.py conversation_manager.py prompts.py
+backend/ main.py turn.py llm_engine.py conversation_manager.py prompts.py
          rag/{chunking,embedder,ingest,retriever}.py  rag/index/ (generated)
+         tools/{fine,calendar_tool,catalogue,crm,orchestrator,specs}.py
+         voice/{asr,tts,endpoint,sentences,pipeline,setup}.py
          corpus/{books,policies}/  eval/retrieval_queries.json (60 labelled)
          eval_retrieval.py benchmark*.py collect_transcripts.py tests/
+         requirements-voice.txt
 frontend/index.html   docs/example_dialogues.md
 ```

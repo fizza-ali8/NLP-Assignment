@@ -13,15 +13,22 @@ Assignment 2 additions
   GET  /rag/status          - is the index loaded, how many chunks, cache stats
   POST /rag/reload          - re-read the index after re-running rag.ingest
 
+Assignment 3 additions (alongside the text contract, not instead of it)
+  GET  /voice/status        - is local ASR / TTS installed
+  GET  /tools               - tool names and JSON schemas
+  WS frames type=audio_start|audio_chunk|audio_end, and server events
+  transcript / speech_end / audio / audio_done. A text-only client never
+  sends these and never has to understand them.
+
 The WebSocket message contract from Assignment 1 is unchanged: same message
-types, same required fields. The only addition is an OPTIONAL "sources"
-array on the "done" event, present only when retrieval found relevant
-chunks for that turn (bonus: visible citations). A client that ignores
+types, same required fields. Optional extras: "sources" on done (Assignment 2),
+and "timings" on done for a voice turn (Assignment 3). A client that ignores
 unknown fields behaves exactly as in Assignment 1.
 
-Per-turn flow:  user message -> retrieve (timeout-guarded, never raises)
--> conversation manager builds [system][older turns][user + excerpts]
--> stream tokens from the local model -> "done" (+ sources).
+Per-turn flow:  user message (typed, or the final transcript) -> retrieve
+-> tools if the utterance needs one -> conversation manager builds
+[system][older turns][user + excerpts + tool result] -> stream tokens
+-> for voice, speak each finished sentence while tokens are still arriving.
 
 Concurrency notes:
   - Each WebSocket connection is its own asyncio task (Starlette does this),
@@ -46,15 +53,16 @@ import asyncio
 import json
 import logging
 import os
-import time
 
-from conversation_manager import ConversationManager, MAX_TURNS
-from llm_engine import stream_chat, warm_up as llm_warm_up
+from conversation_manager import ConversationManager
+from llm_engine import warm_up as llm_warm_up
 from prompts import SYSTEM_PROMPT
 from rag import retriever
-from rag.retriever import (
-    retrieve_safe, format_context, select_for_context, build_retrieval_query, chunks_for_source, merge_followup,
-)
+from rag.retriever import retrieve_safe
+from tools.specs import SCHEMAS
+from turn import complete_turn
+from voice import asr, tts
+from voice.pipeline import AUDIO_TYPES, handle_voice_message
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("app")
@@ -135,6 +143,16 @@ async def reset_session(session_id: str):
     return {"session_id": sid}
 
 
+@app.get("/voice/status")
+async def voice_status():
+    return {"asr": asr.status(), "tts": tts.status()}
+
+
+@app.get("/tools")
+async def tool_schemas():
+    return {"tools": SCHEMAS}
+
+
 @app.websocket("/ws/chat")
 async def ws_chat(websocket: WebSocket):
     """
@@ -142,7 +160,7 @@ async def ws_chat(websocket: WebSocket):
       {"session_id": "<uuid or empty>", "message": "<user text>"}
 
     Outgoing JSON message shapes (unchanged types; "done" gains an
-    optional "sources" field):
+    optional "sources" field, and on a voice turn an optional "timings"):
       {"type": "session", "session_id": "<uuid>"}          -- sent once, on connect/first turn
       {"type": "token", "content": "<partial text>"}        -- streamed repeatedly
       {"type": "done", "content": "<full text>",
@@ -150,9 +168,19 @@ async def ws_chat(websocket: WebSocket):
        "sources": [{"title": "...", "source": "..."}, ...]} -- "sources" present only when
                                                                  retrieval was used this turn
       {"type": "error", "content": "<message>"}             -- malformed input or model failure
+
+    Voice frames (ignored by a text-only client, because that client never
+    sends them) use the same socket:
+      -> {"type": "audio_start"|"audio_chunk"|"audio_end", "session_id", "user_id"?}
+      <- {"type": "transcript", "content", "final"}
+      <- {"type": "speech_end"}
+      <- {"type": "audio", "seq", "mime", "audio"}   base64 WAV, in order
+      <- {"type": "audio_done"}
+    The final transcript then goes through the same turn as typed text.
     """
     await websocket.accept()
     session_id = None
+    voice_state: dict = {}
 
     try:
         while True:
@@ -164,6 +192,12 @@ async def ws_chat(websocket: WebSocket):
             except json.JSONDecodeError:
                 await websocket.send_json(
                     {"type": "error", "content": "Malformed request: expected valid JSON."}
+                )
+                continue
+
+            if isinstance(data, dict) and data.get("type") in AUDIO_TYPES:
+                session_id = await handle_voice_message(
+                    websocket, data, voice_state, conv_manager, session_id, rag_enabled=RAG_ENABLED,
                 )
                 continue
 
@@ -186,59 +220,12 @@ async def ws_chat(websocket: WebSocket):
             if session_id != incoming_sid:
                 await websocket.send_json({"type": "session", "session_id": session_id})
 
-            conv_manager.add_user_message(session_id, user_message)
-
-            # --- retrieval (Assignment 2, Phases II-IV) --------------------
-            # retrieve_safe() never raises: a failure, timeout or missing
-            # index yields an empty list, so the turn proceeds with the
-            # static knowledge base only (Assignment 1 behaviour).
-            retrieved_chunks = []
-            if RAG_ENABLED:
-                query = build_retrieval_query(
-                    user_message, conv_manager.previous_user_message(session_id)
-                )
-                retrieved_chunks = await retrieve_safe(query)
-                # A rewritten (follow-up) query keeps the document discussed in the
-                # previous turn, so "how many copies of it?" still sees that book.
-                if query != user_message:
-                    sticky_src = conv_manager.get_last_source(session_id)
-                    if sticky_src:
-                        retrieved_chunks = merge_followup(chunks_for_source(sticky_src), retrieved_chunks)
-                if retrieved_chunks:
-                    conv_manager.set_last_source(session_id, retrieved_chunks[0].source)
-            injected_chunks = select_for_context(retrieved_chunks)  # exactly what the model will see
-            context_str = format_context(retrieved_chunks)
-
-            prompt_messages, turns_used = conv_manager.build_prompt_messages(
-                session_id, retrieved_context=context_str
+            user_id = data.get("user_id") or None
+            await complete_turn(
+                websocket, conv_manager, session_id, user_message,
+                voice=False, user_id=str(user_id) if user_id else None, rag_enabled=RAG_ENABLED,
+                retrieve=retrieve_safe,
             )
-            if turns_used < MAX_TURNS and conv_manager.turn_count(session_id) > turns_used + 1:
-                logger.info("context budget: history trimmed to %d turn pair(s)", turns_used)
-
-            assistant_text = ""
-            try:
-                async for event in stream_chat(prompt_messages):
-                    if event["type"] == "token":
-                        assistant_text += event["content"]
-                        await websocket.send_json(event)
-                    elif event["type"] == "done":
-                        if injected_chunks:
-                            # cite only what was injected; de-duplicate by source document, preserve relevance order
-                            seen = set()
-                            sources = []
-                            for c in injected_chunks:
-                                if c.source not in seen:
-                                    seen.add(c.source)
-                                    sources.append({"title": c.title, "source": c.source})
-                            event = {**event, "sources": sources}
-                        await websocket.send_json(event)
-                        conv_manager.add_assistant_message(session_id, event["content"])
-                    elif event["type"] == "error":
-                        await websocket.send_json(event)
-            except Exception as e:  # noqa: BLE001 - keep the socket alive on model errors
-                await websocket.send_json(
-                    {"type": "error", "content": f"Model error while streaming: {e}"}
-                )
 
     except WebSocketDisconnect:
         # Client closed the tab / lost connection mid-stream - nothing to crash.

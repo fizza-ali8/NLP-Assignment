@@ -120,6 +120,23 @@ class ContextOverflow(unittest.TestCase):
         m.add_user_message(sid, "x" * 50000)
         self.assertEqual(len(m.get_full_history(sid)[-1]["content"]), cm.MAX_CHARS_PER_MSG)
 
+    def test_a_name_stays_in_its_own_conversation(self):
+        m = cm.ConversationManager()
+        chat_a = m.create_session()
+        chat_b = m.create_session()
+        m.add_user_message(chat_a, "My name is Fizza.")
+        m.add_assistant_message(chat_a, "Hello Fizza.")
+        for _ in range(8):
+            m.add_user_message(chat_a, "Tell me the hours.")
+            m.add_assistant_message(chat_a, "We are open until 8.")
+        m.add_user_message(chat_a, "What is my name?")
+        m.add_user_message(chat_b, "What is my name?")
+        note_a = m.conversation_note(chat_a, "What is my name?")
+        note_b = m.conversation_note(chat_b, "What is my name?")
+        self.assertIn("Fizza", note_a)
+        self.assertNotIn("Fizza", note_b)
+        self.assertIn("do not know", note_b)
+
     def test_budget_leaves_room_inside_the_model_context_window(self):
         import llm_engine
         approx_tokens = cm.CONTEXT_CHAR_BUDGET / 3.5  # conservative chars-per-token for English prose

@@ -13,13 +13,14 @@ Context-memory strategy (Assignment 1, also described in the README):
   - Each stored message is hard-capped at MAX_CHARS_PER_MSG as a safety
     limit against one very long message blowing up the prompt.
 
-Context-overflow strategy (Assignment 2, Phase II/IV): retrieval adds a
-variable-size block of document excerpts to the patron's latest message,
-on top of the fixed system prompt and the history window. format_context()
-in rag/retriever.py caps the excerpts at MAX_CONTEXT_CHARS, but excerpts +
-a long history could still overflow the model's context window, so
-build_prompt_messages() applies an explicit priority order when the total
-character budget (CONTEXT_CHAR_BUDGET) is exceeded:
+Context-overflow strategy (Assignment 2, Phase II/IV, still used with tools):
+retrieval adds a variable-size block of document excerpts to the patron's
+latest message, and a tool result is appended after that, on top of the
+fixed system prompt and the history window. format_context() in
+rag/retriever.py caps the excerpts at MAX_CONTEXT_CHARS, but excerpts +
+a tool result + a long history could still overflow the model's context
+window, so build_prompt_messages() applies an explicit priority order when
+the total character budget (CONTEXT_CHAR_BUDGET) is exceeded:
 
   1. system prompt             - never trimmed (it holds the domain policy)
   2. the patron's current turn - never dropped; its retrieved excerpts are
@@ -35,8 +36,12 @@ local model server can reuse its cached processing of that large prefix.
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+import re
 from typing import List, Dict
 import uuid
+
+_NAME_IN_CHAT = re.compile(r"\bmy name is\s+([A-Za-z]+(?:\s+[A-Za-z]+){0,2})", re.I)
+_ASKS_NAME = re.compile(r"\b(my name|who am i|what am i called)\b", re.I)
 
 from prompts import SYSTEM_PROMPT, format_user_turn
 
@@ -109,7 +114,7 @@ class ConversationManager:
         return list(self._sessions[session_id].history)
 
     def build_prompt_messages(
-        self, session_id: str, retrieved_context: str = ""
+        self, session_id: str, retrieved_context: str = "", tool_context: str = ""
     ) -> tuple[List[Dict[str, str]], int]:
         """
         Builds the exact message list sent to the LLM:
@@ -135,12 +140,23 @@ class ConversationManager:
         # Last resort only: if this single turn (question + excerpts) would
         # not fit next to the system prompt, shorten the excerpts.
         ctx = retrieved_context
+        tool = (tool_context or "").strip()
         max_turn_chars = CONTEXT_CHAR_BUDGET - len(SYSTEM_PROMPT)
         overhead = len(format_user_turn(current_raw, "x")) - len(current_raw) - 1
-        allowed_ctx = max(0, max_turn_chars - len(current_raw) - overhead)
+        # A tool/CRM block rides on this same turn. Reserve room for it so the
+        # excerpts are what get shortened, and shorten the tool text only if
+        # the question plus the tool still cannot fit beside the system prompt.
+        tool_len = (len(tool) + 2) if tool else 0
+        allowed_ctx = max(0, max_turn_chars - len(current_raw) - overhead - tool_len)
         if len(ctx) > allowed_ctx:
             ctx = ctx[:allowed_ctx].rstrip()
         current_text = format_user_turn(current_raw, ctx)
+        if tool:
+            block = "\n\n" + tool
+            room = max_turn_chars - len(current_text)
+            if len(block) > max(0, room):
+                block = block[:max(0, room)]
+            current_text += block
 
         base_len = len(SYSTEM_PROMPT) + len(current_text)
         turns = MAX_TURNS
@@ -155,6 +171,31 @@ class ConversationManager:
         messages.extend(windowed)
         messages.append({"role": "user", "content": current_text})
         return messages, turns
+
+    def conversation_note(self, session_id: str, user_message: str) -> str:
+        """
+        Facts this session actually heard. Never reads another session or the
+        saved patron record. Attached to the current turn so a name still
+        answers after it has slid out of the recent-history window.
+        """
+        name = ""
+        for message in self._sessions[session_id].history:
+            if message["role"] != "user":
+                continue
+            found = _NAME_IN_CHAT.search(message["content"])
+            if found:
+                name = found.group(1).strip()
+        if name:
+            return (
+                "THIS CHAT ONLY: in this conversation the patron said their name is "
+                f"{name}. Do not use a name from any other chat."
+            )
+        if _ASKS_NAME.search(user_message or ""):
+            return (
+                "THIS CHAT ONLY: the patron has not said their name in this conversation. "
+                "Say you do not know. Do not guess, and do not use another chat or a saved record."
+            )
+        return ""
 
     def previous_user_message(self, session_id: str) -> str | None:
         """The patron message before the latest one (used to resolve follow-up questions for retrieval)."""

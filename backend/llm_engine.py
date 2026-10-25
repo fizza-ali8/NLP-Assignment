@@ -29,7 +29,7 @@ import httpx
 from typing import AsyncGenerator, List, Dict
 
 OLLAMA_URL = "http://localhost:11434/api/chat"
-MODEL_NAME = "qwen2.5:3b"   # change to whatever CPU-friendly model you pulled
+MODEL_NAME = "qwen2.5:1.5b"  # installed local model; 3b needs ~2 GB free to pull
 NUM_CTX = 8192               # see module docstring - sized for our system prompt + RAG context
 KEEP_ALIVE = "30m"           # keep the model in RAM between messages (avoids ~1 min cold reloads)
 REQUEST_TIMEOUT = 120.0

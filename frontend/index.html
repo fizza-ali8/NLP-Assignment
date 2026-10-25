@@ -259,6 +259,12 @@
     cursor: pointer;
   }
 
+  #composer button.mic {
+    background: var(--shelf);
+    padding: 0 16px;
+  }
+  #composer button.mic.live { background: #8c3a32; }
+  #composer button.mic:not(:disabled):hover { background: var(--shelf-dark); }
   #composer button:disabled { background: #cbb99b; cursor: not-allowed; }
   #composer button:not(:disabled):hover { background: var(--amber-dark); }
   #composer button:focus-visible { outline: 2px solid var(--shelf); outline-offset: 2px; }
@@ -307,12 +313,13 @@
       <path d="M32 20v30" stroke="#8a9188" stroke-width="2"/>
     </svg>
     <p>Welcome to Riverbend Community Library.</p>
-    <p class="hint">Ask about hours, borrowing a book, holds, or your membership.</p>
+    <p class="hint">Ask about hours, borrowing a book, holds, or your membership. You can also use the microphone.</p>
   </div>
 </div>
 
 <form id="composer">
   <input id="input" type="text" placeholder="Ask about books, loans, holds, or hours…" autocomplete="off" />
+  <button id="mic-btn" class="mic" type="button" aria-label="Speak">Mic</button>
   <button id="send-btn" type="submit">Send</button>
 </form>
 
@@ -322,13 +329,27 @@ const WS_URL = "ws://localhost:8000/ws/chat";
 
 // ---- State ---------------------------------------------------------------
 let ws = null;
-let sessionId = localStorage.getItem("library_session_id") || null;
+let sessionId = sessionStorage.getItem("library_session_id") || null;
+let userId = localStorage.getItem("library_user_id") || null;
+if (!userId) {
+  userId = (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()));
+  localStorage.setItem("library_user_id", userId);
+}
 let currentBotBubble = null;
 let currentBotText = "";
+let liveTranscript = null;
+let recording = false;
+let micStream = null;
+let audioCtx = null;
+let processor = null;
+let nextAudioSeq = 0;
+const pendingAudio = new Map();
+let playingAudio = false;
 
 const chatEl = document.getElementById("chat");
 const inputEl = document.getElementById("input");
 const sendBtn = document.getElementById("send-btn");
+const micBtn = document.getElementById("mic-btn");
 const statusEl = document.getElementById("conn-status");
 const resetBtn = document.getElementById("reset-btn");
 
@@ -396,7 +417,30 @@ function connect() {
 
     if (data.type === "session") {
       sessionId = data.session_id;
-      localStorage.setItem("library_session_id", sessionId);
+      sessionStorage.setItem("library_session_id", sessionId);
+    } else if (data.type === "transcript") {
+      if (data.status === "listening") {
+        statusEl.textContent = "Listening…";
+        return;
+      }
+      clearEmptyState();
+      if (!liveTranscript) liveTranscript = addMessage("user", data.content || "…");
+      liveTranscript.textContent = data.content || "…";
+      if (data.final) {
+        liveTranscript = null;
+        statusEl.textContent = "Thinking…";
+        nextAudioSeq = 0;
+        pendingAudio.clear();
+      }
+    } else if (data.type === "speech_end") {
+      stopMic(false);
+      statusEl.textContent = "Transcribing…";
+    } else if (data.type === "audio") {
+      statusEl.textContent = "Speaking…";
+      pendingAudio.set(data.seq, data.audio);
+      drainAudio();
+    } else if (data.type === "audio_done") {
+      if (!playingAudio && pendingAudio.size === 0) statusEl.textContent = "Connected";
     } else if (data.type === "token") {
       if (!currentBotBubble) {
         currentBotBubble = addMessage("bot", "");
@@ -413,10 +457,14 @@ function connect() {
       currentBotBubble = null;
       currentBotText = "";
       sendBtn.disabled = false;
+      micBtn.disabled = false;
+      if (!playingAudio) statusEl.textContent = "Connected";
     } else if (data.type === "error") {
       addMessage("error", data.content);
       currentBotBubble = null;
       sendBtn.disabled = false;
+      micBtn.disabled = false;
+      stopMic(false);
     }
   };
 }
@@ -425,7 +473,8 @@ function sendMessage(text) {
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
   addMessage("user", text);
   sendBtn.disabled = true;
-  ws.send(JSON.stringify({ session_id: sessionId, message: text }));
+  micBtn.disabled = true;
+  ws.send(JSON.stringify({ session_id: sessionId, user_id: userId, message: text }));
 }
 
 document.getElementById("composer").addEventListener("submit", (e) => {
@@ -436,19 +485,118 @@ document.getElementById("composer").addEventListener("submit", (e) => {
   inputEl.value = "";
 });
 
+function downsample(buffer, fromRate, toRate) {
+  if (fromRate === toRate) return buffer;
+  const ratio = fromRate / toRate;
+  const length = Math.round(buffer.length / ratio);
+  const out = new Float32Array(length);
+  let offset = 0;
+  for (let i = 0; i < length; i++) {
+    const next = Math.min(buffer.length, Math.round((i + 1) * ratio));
+    let sum = 0, count = 0;
+    for (let j = offset; j < next; j++) { sum += buffer[j]; count++; }
+    out[i] = count ? sum / count : 0;
+    offset = next;
+  }
+  return out;
+}
+
+function pcmToBase64(float32) {
+  const pcm = new Int16Array(float32.length);
+  for (let i = 0; i < float32.length; i++) {
+    const s = Math.max(-1, Math.min(1, float32[i]));
+    pcm[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+  }
+  const bytes = new Uint8Array(pcm.buffer);
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  }
+  return btoa(binary);
+}
+
+function drainAudio() {
+  if (playingAudio || !pendingAudio.has(nextAudioSeq)) return;
+  playingAudio = true;
+  const b64 = pendingAudio.get(nextAudioSeq);
+  pendingAudio.delete(nextAudioSeq);
+  nextAudioSeq += 1;
+  const audio = new Audio("data:audio/wav;base64," + b64);
+  const done = () => { playingAudio = false; drainAudio(); if (!playingAudio && pendingAudio.size === 0 && statusEl.textContent === "Speaking…") statusEl.textContent = "Connected"; };
+  audio.onended = done;
+  audio.onerror = done;
+  audio.play().catch(done);
+}
+
+function stopMic(sendEnd) {
+  if (processor) { processor.disconnect(); processor.onaudioprocess = null; processor = null; }
+  if (micStream) { micStream.getTracks().forEach((t) => t.stop()); micStream = null; }
+  if (audioCtx) { audioCtx.close(); audioCtx = null; }
+  const was = recording;
+  recording = false;
+  micBtn.classList.remove("live");
+  micBtn.textContent = "Mic";
+  if (was && sendEnd && ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: "audio_end", session_id: sessionId, user_id: userId }));
+  }
+}
+
+async function startMic() {
+  if (!navigator.mediaDevices || !ws || ws.readyState !== WebSocket.OPEN) {
+    addMessage("error", "Microphone is not available in this browser.");
+    return;
+  }
+  try {
+    micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (e) {
+    addMessage("error", "Microphone permission was blocked.");
+    return;
+  }
+  audioCtx = new AudioContext();
+  const source = audioCtx.createMediaStreamSource(micStream);
+  processor = audioCtx.createScriptProcessor(4096, 1, 1);
+  const mute = audioCtx.createGain();
+  mute.gain.value = 0;
+  source.connect(processor);
+  processor.connect(mute);
+  mute.connect(audioCtx.destination);
+  recording = true;
+  micBtn.classList.add("live");
+  micBtn.textContent = "Stop";
+  sendBtn.disabled = true;
+  ws.send(JSON.stringify({ type: "audio_start", session_id: sessionId || "", user_id: userId }));
+  processor.onaudioprocess = (event) => {
+    if (!recording || !ws || ws.readyState !== WebSocket.OPEN) return;
+    const down = downsample(event.inputBuffer.getChannelData(0), audioCtx.sampleRate, 16000);
+    if (!down.length) return;
+    ws.send(JSON.stringify({
+      type: "audio_chunk",
+      session_id: sessionId,
+      user_id: userId,
+      sample_rate: 16000,
+      audio: pcmToBase64(down),
+    }));
+  };
+}
+
+micBtn.addEventListener("click", () => {
+  if (recording) stopMic(true);
+  else startMic();
+});
+
 resetBtn.addEventListener("click", async () => {
   chatEl.innerHTML = "";
-  if (sessionId) {
-    try {
-      const res = await fetch(`http://localhost:8000/session/${sessionId}/reset`, { method: "POST" });
-      const data = await res.json();
-      sessionId = data.session_id;
-      localStorage.setItem("library_session_id", sessionId);
-    } catch (e) {
-      console.error("Reset failed", e);
-    }
+  try {
+    const res = await fetch("http://localhost:8000/session/new", { method: "POST" });
+    const data = await res.json();
+    sessionId = data.session_id;
+    sessionStorage.setItem("library_session_id", sessionId);
+  } catch (e) {
+    console.error("New session failed", e);
+    sessionId = null;
+    sessionStorage.removeItem("library_session_id");
   }
-  addMessage("bot", "Session reset. Hi again! How can I help you at Riverbend Library today?");
+  addMessage("bot", "New conversation. How can I help you at Riverbend Library today?");
 });
 
 connect();

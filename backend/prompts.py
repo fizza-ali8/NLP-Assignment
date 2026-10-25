@@ -1,13 +1,11 @@
 """
 prompts.py
 ----------
-All "knowledge" the assistant has about the library is embedded here as
-static text inside the system prompt. This is NOT retrieval-augmented
-generation: nothing is fetched per-query from a database or vector store.
-The same fixed block of text is included in every session's system prompt,
-and the LLM reasons over it using its own context window. This satisfies
-the assignment constraint of "no tools / no RAG - only prompt orchestration
-and conversational memory".
+The library's standing rules live here as static text inside the system
+prompt. Assignment 2 added retrieval on top of this (excerpts are attached
+to the user message, not baked into this prompt). Assignment 3 adds the
+tool-calling instructions the same way: the schemas are static, and each
+tool's result is attached to the user message for that turn only.
 
 NOTE (Assignment 2): a RAG retrieval layer has since been added on top of
 this (see rag/retriever.py and conversation_manager.py). The static
@@ -15,9 +13,14 @@ knowledge base below stays in the prompt as a *fallback* layer; retrieved
 document chunks are NOT put in the system prompt but attached to the
 patron's latest message (format_user_turn below). That keeps the system
 prompt byte-identical on every turn, so Ollama can reuse its cached
-processing of this ~2,500-token prefix instead of re-reading it each time -
-the main reason retrieval does not make the assistant feel slower.
+processing of this prefix instead of re-reading it each time.
+
+NOTE (Assignment 3): tool schemas live in this same static prompt
+(tools/specs.py). Tool results are attached to the latest user message,
+next to any retrieved excerpts, so the cached prefix still does not change.
 """
+
+from tools.specs import TOOL_INSTRUCTIONS
 
 LIBRARY_KNOWLEDGE_BASE = """
 LIBRARY FACTS (use only this information when answering; do not invent policies):
@@ -209,6 +212,8 @@ knowledgeable chatbot who helps patrons with library services ONLY.
 {CONVERSATION_STAGES}
 
 {RAG_POLICY}
+
+{TOOL_INSTRUCTIONS}
 
 {OFF_TOPIC_EXAMPLE}
 
